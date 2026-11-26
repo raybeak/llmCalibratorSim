@@ -295,11 +295,10 @@ def _buildCalibratorPrompt(sanitizedRecords: list[dict[str, Any]]) -> str:
         '"target_groups":["<ext_enum>"],'
         '"diagnosis":"short_tag"}\n'
         "Rules:\n"
-        "- If >=3 groups have high FN, it is global_decay: lower global_delta.d_theta (negative).\n"
-        "- If 1-2 groups have high FN (others healthy), it is subgroup_drift: set group_overrides for those groups "
-        "(d_theta negative, d_alpha positive) and recommended_action='trigger_replay' with target_groups.\n"
-        "- If 1 group has high FP with high mean_fp_G and concentrated top_fp_pairs, it is structural_label_swap: "
-        "set group_overrides (d_alpha=0.2, d_beta=0.2) and recommended_action='trigger_replay' with target_groups.\n"
+        "- Ignore minor FP noise (fp/n < 0.15 or fp < 3): return 'noop' if all groups are healthy.\n"
+        "- If >=3 groups have high FN, set global_delta.d_theta negative (global_decay) AND still check each group for concentrated top_fp_pairs.\n"
+        "- If 1-2 groups have high FN (others healthy), set group_overrides (d_theta negative, d_alpha positive) and recommended_action='trigger_replay' with target_groups.\n"
+        "- If any group has fp/n >= 0.15 with concentrated top_fp_pairs, set group_overrides (d_alpha=0.2, d_beta=0.2) and recommended_action='trigger_replay' with target_groups (even during global_decay).\n"
         "- Bounds: d_theta in [-0.15,0.15], d_alpha/d_beta/d_T in [-0.2,0.2].\n"
         f"Summary:\n{json.dumps(byGroup)}"
     )
