@@ -42,6 +42,24 @@
 
 *(참고: `sionic-ai/jev-omni`는 `OPENGATEWAY`에서 `400 unsupported_endpoint: use /v1/decisions`를 반환해 `/v1/chat/completions` 기반 JSON Calibrator 역할에는 부적합함이 확인되었습니다.)*
 
+### 2.3 장기 14-사이클 궤적 및 Overshoot 스트레스 테스트 (`stressTrajectory.py`, `seed=42`, `12/12 tests OK`)
+
+#### PID Gain Sweep (`global_decay` + `subgroup_drift` + `label_swap` + `compound_shock`)
+| `kp` | `ki` | 최종 Train Acc | 최종 Held-Out Test Acc | 최고 Test Acc | 최대 Train-Test Gap | $\theta$ 부호 반전 | Overshoot |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| 0.50 | 0.10 | 0.188 | 0.125 | 1.000 | 0.104 | 1 | `True` (추종 지연) |
+| 1.50 | 0.30 | 0.250 | 0.240 | 1.000 | 0.021 | 1 | `True` (추종 지연) |
+| 3.50 | 0.80 | 0.250 | 0.240 | 1.000 | 0.062 | **3** | `True` (진동 발생) |
+| 8.00 | 2.00 | 0.667 | 0.688 | 1.000 | 0.104 | **3** | `True` (진동 발생) |
+
+#### 단계별 Held-Out Test 궤적 (`Per-Group PID` vs. 경화된 `GLM-5.3`)
+| 구간 (Cycles) | `per_group_pid` Test Acc | `glm_5.3_clamped` Test Acc | `glm_5.3_overshoot_push` Test Acc | 핵심 관찰 |
+| :--- | :---: | :---: | :---: | :--- |
+| `clean` (0–2) | 1.000 | 1.000 | 1.000 | `GLM` 정상 `noop` 유지 |
+| `subgroup_drift` (3–6) | 0.750 → 0.833 | 0.750 → **0.917** | 0.750 → **1.000** → 0.958 | 경화 프롬프트로 Cycle 6 경미한 `FP` 잡음 무시(`noop`) |
+| `label_swap` (7–10) | 0.750 (정체) | 0.750 → 0.833 → 0.771 | 0.750 → 0.854 → 0.771 → **1.000** | Cycle 9 일시 Overshoot(`slideTheta` 1.65→1.35) 후 Cycle 10 완전 복구 (`ECE 0.048`) |
+| `compound_shock` (11–13) | 0.229 → 0.146 | 0.208 → 0.104 | 0.229 → 0.250 → 0.229 | 0.35배 급감 + 동시 `doc_md` 역전이 3사이클 Clamping 한계 초과 |
+
 ---
 
 ## 3. 핵심 발견 (Key Findings)
@@ -49,6 +67,7 @@
 2. **PID로 충분한 구간 (`global_decay`, `subgroup_drift`)**: 단순 전역 감쇠에서는 API 비용과 지연이 없는 PID가 동등 이상의 성능을 보였습니다(`0.577` vs `0.556` 오프라인; `0.365` 실측).
 3. **Group-Local Layer 2 분리를 통한 Catastrophic Forgetting 방지**: Layer 2를 전 그룹이 공유했을 때는 `doc_slide` Replay가 타 그룹 성능을 `0.375`까지 붕괴시켰으나, `Shared Layer 1 + Group-Local Layer 2 Head` 분리 구조로 교차 망각 없이 `0.929` 복구를 달성했습니다.
 4. **실 LLM 모델별 지능 하한선 확인**: `glm-5.3-flash-ultrafast`가 속도(`26.3s`), JSON 준수율(`1.00`), 정확도(`0.958` / `0.948`) 모두 1위를 기록한 반면, `gpt-4.1-nano`는 JSON 파싱 실패(`0.67`–`0.83`)와 `label_swap` 미탐(`0.771`)으로 하한선 미달이 확인되었습니다. `deepseek-eco`의 간헐적 파싱 실패(`0.83`)에서도 `noop` 폴백이 안정적으로 시스템을 보호했습니다.
+5. **Train vs. Held-Out Test 일반화 및 Overshoot 경계**: 14-사이클 복합 충격에서도 Group-Local Layer 2 Replay는 `maxTrainTestGap <= 0.062`로 Train 과적합 없이 일반화되었습니다. `Per-Group PID`는 `kp >= 3.5`에서 $\theta$ 부호 반전 3회 진동이 시작되었고, 공격적 `GLM`은 Cycle 9 일시 Overshoot 후 Cycle 10에 `1.000`으로 복구되었으며, 프롬프트 경화로 Cycle 6 오탐을 제거했습니다.
 
 ---
 
@@ -60,6 +79,9 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 
 # 5-Seed 오프라인 벤치마크 실행 (<5s)
 PYTHONPATH=src python3 -m llmCalibratorSim.runBenchmark
+
+# 14-사이클 Train/Held-Out Test 궤적 및 Overshoot 스트레스 테스트
+PYTHONPATH=src python3 -m llmCalibratorSim.stressTrajectory
 
 # pi-shell + envrun 기반 실 LLM Unit 4 벤치마크 실행 (평문 시크릿 디스크 미저장)
 source ~/.config/myos/env-helpers.sh

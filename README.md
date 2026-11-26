@@ -42,6 +42,24 @@ A lightweight, pure-Python (`Python 3.12 + NumPy`) simulation testbed evaluating
 
 *(Note: `sionic-ai/jev-omni` was also tested and rejected by `OPENGATEWAY` with `400 unsupported_endpoint: use /v1/decisions`, confirming it is a discrete decision endpoint rather than a `/v1/chat/completions` JSON calibrator.)*
 
+### 2.3 Long-Horizon 14-Cycle Trajectory & Overshoot Stress Test (`stressTrajectory.py`, `seed=42`, `12/12 tests OK`)
+
+#### PID Gain Sweep (`global_decay` + `subgroup_drift` + `label_swap` + `compound_shock`)
+| `kp` | `ki` | End Train Acc | End Held-Out Test Acc | Peak Test Acc | Max Train-Test Gap | $\theta$ Sign Flips | Overshoot |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| 0.50 | 0.10 | 0.188 | 0.125 | 1.000 | 0.104 | 1 | `True` (clamped lag) |
+| 1.50 | 0.30 | 0.250 | 0.240 | 1.000 | 0.021 | 1 | `True` (clamped lag) |
+| 3.50 | 0.80 | 0.250 | 0.240 | 1.000 | 0.062 | **3** | `True` (oscillation) |
+| 8.00 | 2.00 | 0.667 | 0.688 | 1.000 | 0.104 | **3** | `True` (oscillation) |
+
+#### Phase-by-Phase Held-Out Test Trajectory (`Per-Group PID` vs. `GLM-5.3` Hardened)
+| Phase (Cycles) | `per_group_pid` Test Acc | `glm_5.3_clamped` Test Acc | `glm_5.3_overshoot_push` Test Acc | Key Observation |
+| :--- | :---: | :---: | :---: | :--- |
+| `clean` (0–2) | 1.000 | 1.000 | 1.000 | `GLM` emits `noop` (`all_groups_healthy`) |
+| `subgroup_drift` (3–6) | 0.750 → 0.833 | 0.750 → **0.917** | 0.750 → **1.000** → 0.958 | Hardened prompt ignores Cycle 6 minor FP noise (`noop`) |
+| `label_swap` (7–10) | 0.750 (stalled) | 0.750 → 0.833 → 0.771 | 0.750 → 0.854 → 0.771 → **1.000** | Cycle 9 transient overshoot (`slideTheta` 1.65→1.35) self-corrects by Cycle 10 (`ECE 0.048`) |
+| `compound_shock` (11–13) | 0.229 → 0.146 | 0.208 → 0.104 | 0.229 → 0.250 → 0.229 | 0.35x sudden decay + masked `doc_md` swap exceeds 3-cycle clamp speed |
+
 ---
 
 ## 3. Key Findings
@@ -49,6 +67,7 @@ A lightweight, pure-Python (`Python 3.12 + NumPy`) simulation testbed evaluating
 2. **Where PID Is Enough (`global_decay`, `subgroup_drift`)**: On pure scalar threshold decay, PID matches or beats LLMs with zero latency/API cost (`0.577` vs `0.556` offline; `0.365` live).
 3. **Group-Local Layer 2 Prevents Catastrophic Forgetting**: When Layer 2 was shared across all groups, replaying `doc_slide` collapsed global accuracy to `0.375`; splitting into `Shared Layer 1 + Group-Local Layer 2 Head` eliminated cross-group interference (`0.929`).
 4. **Clear Capability Floor Across Live Models**: `glm-5.3-flash-ultrafast` led on speed (`26.3s`), JSON reliability (`1.00`), and accuracy (`0.958` / `0.948`), while `gpt-4.1-nano` fell below the capability floor (`0.67`–`0.83` parse rate, `0.771` on label swap). Even when `deepseek-eco` failed 1 of 6 JSON parses (`0.83`), `noop` fallback kept the system stable.
+5. **Train vs. Held-Out Test Generalization & Overshoot Boundary**: Across 14-cycle escalating shocks, Group-Local Layer 2 replay kept `maxTrainTestGap <= 0.062` (no Train overfitting). `Per-Group PID` began oscillating at `kp >= 3.5` (3 $\theta$ sign flips), while aggressive `GLM` showed a transient Cycle 9 $\theta$ overshoot before hitting `1.000` Test Acc at Cycle 10; prompt hardening eliminated Cycle 6 false `label_swap` triggers on minor FP noise.
 
 ---
 
@@ -60,6 +79,9 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 
 # Run 5-seed offline benchmark (<5s)
 PYTHONPATH=src python3 -m llmCalibratorSim.runBenchmark
+
+# Run 14-cycle Train/Held-Out Test trajectory & overshoot stress test
+PYTHONPATH=src python3 -m llmCalibratorSim.stressTrajectory
 
 # Run live Unit 4 benchmark via pi-shell + envrun (zero-disk secret injection)
 source ~/.config/myos/env-helpers.sh
