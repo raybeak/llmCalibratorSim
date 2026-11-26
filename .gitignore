@@ -1,0 +1,15 @@
+# Secrets (Zero-disk plaintext policy)
+.env*
+!.env.example
+
+# Python caches & virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Simulation outputs & logs
+results/
+*.log

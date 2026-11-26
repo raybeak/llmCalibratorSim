@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llmCalibratorSim"
+version = "0.1.0"
+description = "Sovereignty-preserving Clamped LLM Calibrator vs. PID/EMA benchmark on a local Forward-Forward classifier"
+requires-python = ">=3.12"
+dependencies = ["numpy>=2.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
