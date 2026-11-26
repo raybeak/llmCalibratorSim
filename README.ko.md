@@ -6,11 +6,28 @@
 
 ---
 
-## 1. 주요 기능 및 아키텍처
-1. **로컬 Forward-Forward 분류기 (`ffModel.py`)**: Backpropagation 없이 동작하는 2-Layer NumPy FF 네트워크(`Shared Layer 1` + `Group-Local Layer 2 Head` with class skip-connection) 및 Jev-like Temperature Softmax 구현.
-2. **3대 고장 주입 환경 (`driftEnv.py`)**: `global_decay`(전역 감쇠), `subgroup_drift`(`doc_hwpx` 그룹 특이 이동), `structural_label_swap`(`doc_slide` 내부 카테고리 역전) 및 Activity-Gated Implicit Feedback($p_{\text{noise}} = 0.05$) 시뮬레이션.
-3. **엄격한 Outbound Sanitizer (`sanitizer.py`)**: 8개 화이트리스트 키(`decision_id`, `ext_enum`, `pred_cat`, `actual_cat`, `outcome`, `raw_goodness_G`, `confidence_p`, `timestamp_s`) 외 모든 키, 파일 경로, 장문 텍스트, 임베딩 벡터를 100% 차단 (`bypass` 플래그 없음).
-4. **3-Way Calibrator 대조군 (`calibrators.py`, `runBenchmark.py`)**: `GlobalPidCalibrator`, `PerGroupPidCalibrator`, `ClampedLlmCalibrator`(오프라인 `DeterministicRuleOracle` 및 실 LLM `PiCliBackend`)를 비교하며 Hard Clamping 및 깨진 JSON에 대한 `noop` 폴백을 강제.
+## 1. 아키텍처 및 Sovereignty 경계
+
+```mermaid
+flowchart LR
+    Stream["데이터 스트림 (Synthetic / DatasetSource)<br/>trainBatch + 독립 heldOutTestBatch"] --> FF["로컬 2-Layer NumPy FF (36 -> 32 -> 16)<br/>Shared Layer 1 + Group-Local Layer 2 Head<br/>Backprop-free 로컬 업데이트 + Replay"]
+    FF --> Gate["Activity-Gated Feedback<br/>(M=3 후속 조작 확정, p_noise=0.05..0.10)"]
+    Gate --> San["엄격한 8-Key Sanitizer (우회 불가)<br/>파일 경로, 원문, 임베딩 벡터 100% 차단"]
+    San -->|"원본 데이터 유출 0 Bytes"| Cal["Clamped Calibrator / 대조군<br/>Global PID | Per-Group PID | LLM (PiCliBackend)"]
+    Cal -->|"Hard-Clamped 델타 + noop 폴백"| FF
+```
+
+1. **로컬 Forward-Forward 분류기 (`ffModel.py`)**: Backpropagation 없이 동작하는 2-Layer NumPy FF 네트워크(`Shared Layer 1` [36→32] + `Group-Local Layer 2 Head` [36→16] with class skip-connection) 및 Jev-like Temperature Softmax 구현.
+2. **3대 고장 주입 및 복합 충격 환경 (`driftEnv.py`, `stressTrajectory.py`)**: `global_decay`(전역 감쇠), `subgroup_drift`(`doc_hwpx` 그룹 특이 이동), `structural_label_swap`(`doc_slide` 내부 카테고리 역전) 및 14-사이클 `compound_shock` 스트레스 테스트와 Activity-Gated Implicit Feedback($M = 3$, $p_{\text{noise}} = 0.05$ 오프라인 / $0.10$ 궤적) 시뮬레이션.
+3. **엄격한 Outbound Sanitizer (`sanitizer.py`)**: 8개 화이트리스트 키(`decision_id`, `ext_enum`, `pred_cat`, `actual_cat`, `outcome`, `raw_goodness_G`, `confidence_p`, `timestamp_s`) 외 모든 키, 파일 경로, 장문 텍스트, 임베딩 벡터, `bool`-as-`int`, 비유한 실수 입력 시 즉시 `SovereigntyViolationError` 발생 (`bypass` 플래그 없음).
+4. **Hard-Clamped Calibrator 대조군 (`calibrators.py`, `runBenchmark.py`)**: `GlobalPidCalibrator`, `PerGroupPidCalibrator`, `ClampedLlmCalibrator`(오프라인 `DeterministicRuleOracle` 및 실 LLM `PiCliBackend`)를 비교하며 Hard Clamping 및 깨진 JSON에 대한 `noop` 폴백을 강제.
+
+| 파라미터 | 사이클당 변화폭(Delta) 상하한 | 절대값 상하한 | JSON 파싱/스키마 오류 시 폴백 |
+| :--- | :---: | :---: | :--- |
+| 임계치 $\theta_g$ | $[-0.15, +0.15]$ | $[0.2, 5.0]$ | `recommended_action = "noop"` (변화량 0) |
+| Positive 가중치 $\alpha_g$ | $[-0.20, +0.20]$ | $[0.2, 3.0]$ | `recommended_action = "noop"` (변화량 0) |
+| Negative 가중치 $\beta_g$ | $[-0.20, +0.20]$ | $[0.2, 3.0]$ | `recommended_action = "noop"` (변화량 0) |
+| Temperature $T_g$ | $[-0.20, +0.20]$ | $[0.2, 5.0]$ | `recommended_action = "noop"` (변화량 0) |
 
 ---
 
@@ -71,10 +88,17 @@
 
 ---
 
-## 4. 실행 방법 및 MDMP 문서 (`doc/`)
+## 4. 알려진 한계 및 범위 제약 (Limitations)
+1. **합성 피처 기반 검증**: 현재 벤치마크는 32차원 군집 합성 벡터(`SyntheticClusterDataset`)를 사용하며, 실제 `EmbeddingGemma 2` 문서 임베딩은 추후 `DatasetSource` 추상 인터페이스를 통해 교체 연결할 수 있습니다.
+2. **복합 충격(Compound Shock) Clamping 추종 한계**: `Cycles 11–13`처럼 Goodness가 `~0.35배` 급감하는 동시에 타 그룹 라벨 역전이 겹치면 3사이클 내에 `d_theta in [-0.15, +0.15]` 제한으로는 어떤 제어기도 완전히 따라잡지 못합니다(`0.104–0.240`).
+3. **Decision 전용 엔드포인트 비호환**: `sionic-ai/jev-omni`처럼 `/v1/decisions` 전용 엔드포인트는 JSON 메타 캘리브레이터로 사용할 수 없으며 `/v1/chat/completions` 지원 모델이 필요합니다.
+
+---
+
+## 5. 실행 방법 및 MDMP 문서 (`doc/`)
 
 ```bash
-# 오프라인 단위 테스트 실행 (10/10)
+# 전체 오프라인 단위 테스트 실행 (12/12)
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 
 # 5-Seed 오프라인 벤치마크 실행 (<5s)
@@ -83,9 +107,10 @@ PYTHONPATH=src python3 -m llmCalibratorSim.runBenchmark
 # 14-사이클 Train/Held-Out Test 궤적 및 Overshoot 스트레스 테스트
 PYTHONPATH=src python3 -m llmCalibratorSim.stressTrajectory
 
-# pi-shell + envrun 기반 실 LLM Unit 4 벤치마크 실행 (평문 시크릿 디스크 미저장)
+# pi-shell + envrun 기반 실 LLM Unit 4 및 14-사이클 궤적 실행 (평문 시크릿 디스크 미저장)
 source ~/.config/myos/env-helpers.sh
 envrun timeout -k 5 150 env PYTHONPATH=src python3 -m llmCalibratorSim.runBenchmark --live-pi OPENGATEWAY/z-ai/glm-5.3-flash-ultrafast < /dev/null
+envrun timeout -k 5 120 env PYTHONPATH=src python3 -m llmCalibratorSim.stressTrajectory --live-glm < /dev/null
 ```
 
 - [01_receiptOfMission.md](./doc/01_receiptOfMission.md) — Step 1: 핵심 연구 질문 및 범위

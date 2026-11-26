@@ -6,11 +6,28 @@ A lightweight, pure-Python (`Python 3.12 + NumPy`) simulation testbed evaluating
 
 ---
 
-## 1. What It Does
-1. **Local Forward-Forward Classifier (`ffModel.py`)**: 2-layer NumPy FF network (`Shared Layer 1` + `Group-Local Layer 2 Head` with class skip-connection) and Jev-like temperature-scaled Softmax, trained locally without backpropagation.
-2. **Controlled Failure Environment (`driftEnv.py`)**: Injects three failure modes—`global_decay`, `subgroup_drift` (`doc_hwpx` only), and `structural_label_swap` (`doc_slide` category inversion)—paired with activity-gated implicit feedback ($p_{\text{noise}} = 0.05$).
-3. **Strict Outbound Sanitizer (`sanitizer.py`)**: Enforces an 8-key whitelist (`decision_id`, `ext_enum`, `pred_cat`, `actual_cat`, `outcome`, `raw_goodness_G`, `confidence_p`, `timestamp_s`) with zero bypass flags; blocks raw paths, text, or embedding vectors before any external backend call.
-4. **3-Way Calibrator Showdown (`calibrators.py`, `runBenchmark.py`)**: Compares `GlobalPidCalibrator`, `PerGroupPidCalibrator`, and `ClampedLlmCalibrator` (offline `DeterministicRuleOracle` or live `PiCliBackend` via `pi-shell`) with hard parameter clamping and automatic `noop` fallback on malformed JSON.
+## 1. Architecture & Sovereignty Boundary
+
+```mermaid
+flowchart LR
+    Stream["Data Stream (Synthetic / DatasetSource)<br/>trainBatch + independent heldOutTestBatch"] --> FF["Local 2-Layer NumPy FF (36 -> 32 -> 16)<br/>Shared Layer 1 + Group-Local Layer 2 Head<br/>Backprop-free Local Updates + Replay"]
+    FF --> Gate["Activity-Gated Feedback<br/>(M=3 active steps, p_noise=0.05..0.10)"]
+    Gate --> San["Strict 8-Key Sanitizer (No Bypass)<br/>Blocks paths, raw text, and embeddings"]
+    San -->|"0 Bytes Raw Data"| Cal["Clamped Calibrator / Baselines<br/>Global PID | Per-Group PID | LLM (PiCliBackend)"]
+    Cal -->|"Hard-Clamped Deltas + noop Fallback"| FF
+```
+
+1. **Local Forward-Forward Classifier (`ffModel.py`)**: 2-layer NumPy FF network (`Shared Layer 1` [36→32] + `Group-Local Layer 2 Head` [36→16] with class skip-connection) and Jev-like temperature-scaled Softmax, trained locally without backpropagation.
+2. **Controlled Failure Environment (`driftEnv.py`)**: Injects three failure modes—`global_decay`, `subgroup_drift` (`doc_hwpx` only), and `structural_label_swap` (`doc_slide` category inversion)—plus a 14-cycle `compound_shock` stress test, paired with activity-gated implicit feedback ($M = 3$, $p_{\text{noise}} = 0.05$ offline / $0.10$ trajectory).
+3. **Strict Outbound Sanitizer (`sanitizer.py`)**: Enforces an 8-key whitelist (`decision_id`, `ext_enum`, `pred_cat`, `actual_cat`, `outcome`, `raw_goodness_G`, `confidence_p`, `timestamp_s`) with zero bypass flags; raises `SovereigntyViolationError` on any raw path, text, vector, `bool`-as-`int`, or non-finite float before any backend call.
+4. **Hard-Clamped Calibrators (`calibrators.py`, `runBenchmark.py`, `stressTrajectory.py`)**: Compares `GlobalPidCalibrator`, `PerGroupPidCalibrator`, and `ClampedLlmCalibrator` (`DeterministicRuleOracle` or live `PiCliBackend` via `pi-shell`).
+
+| Parameter | Per-Cycle Delta Bound | Absolute Bound | Fallback on Malformed JSON / Error |
+| :--- | :---: | :---: | :--- |
+| Threshold $\theta_g$ | $[-0.15, +0.15]$ | $[0.2, 5.0]$ | `recommended_action = "noop"` (zero delta) |
+| Positive weight $\alpha_g$ | $[-0.20, +0.20]$ | $[0.2, 3.0]$ | `recommended_action = "noop"` (zero delta) |
+| Negative weight $\beta_g$ | $[-0.20, +0.20]$ | $[0.2, 3.0]$ | `recommended_action = "noop"` (zero delta) |
+| Temperature $T_g$ | $[-0.20, +0.20]$ | $[0.2, 5.0]$ | `recommended_action = "noop"` (zero delta) |
 
 ---
 
@@ -71,10 +88,17 @@ A lightweight, pure-Python (`Python 3.12 + NumPy`) simulation testbed evaluating
 
 ---
 
-## 4. Quick Usage & MDMP Docs
+## 4. Known Limitations & Scope Boundaries
+1. **Synthetic Features Only (So Far)**: Benchmarks use 32-dim clustered synthetic vectors (`SyntheticClusterDataset`) rather than real `EmbeddingGemma 2` document vectors; `DatasetSource` ABC is provided for drop-in real embeddings.
+2. **Compound Shock Clamping Lag**: When `goodnessScale` drops abruptly to `~0.35x` while a second group simultaneously swaps labels (`Cycles 11–13`), a 3-cycle window under `d_theta in [-0.15, +0.15]` is too short for any clamped controller to fully track (`0.104–0.240`).
+3. **Decision-Only Endpoints Incompatible**: Models serving only `/v1/decisions` (e.g., `sionic-ai/jev-omni`) cannot act as the JSON meta-calibrator; a `/v1/chat/completions` model is required.
+
+---
+
+## 5. Quick Usage & MDMP Docs
 
 ```bash
-# Run offline unit tests (10/10)
+# Run full offline unit test suite (12/12)
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 
 # Run 5-seed offline benchmark (<5s)
@@ -83,9 +107,10 @@ PYTHONPATH=src python3 -m llmCalibratorSim.runBenchmark
 # Run 14-cycle Train/Held-Out Test trajectory & overshoot stress test
 PYTHONPATH=src python3 -m llmCalibratorSim.stressTrajectory
 
-# Run live Unit 4 benchmark via pi-shell + envrun (zero-disk secret injection)
+# Run live Unit 4 benchmark & 14-cycle trajectory via pi-shell + envrun (zero-disk secret injection)
 source ~/.config/myos/env-helpers.sh
 envrun timeout -k 5 150 env PYTHONPATH=src python3 -m llmCalibratorSim.runBenchmark --live-pi OPENGATEWAY/z-ai/glm-5.3-flash-ultrafast < /dev/null
+envrun timeout -k 5 120 env PYTHONPATH=src python3 -m llmCalibratorSim.stressTrajectory --live-glm < /dev/null
 ```
 
 ### MDMP Documentation (`doc/`)
